@@ -13,8 +13,15 @@ def home():
 
 
 # 1: Display/record
+class filter(BaseModel):
+    genre: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 10,
+    offset: int = 0,
+
+
 @app.post("/shelf/")
-def get_details():
+async def get_details():
     '''
     Display Feature, to display the books in the store  
     param : none
