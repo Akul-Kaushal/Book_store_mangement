@@ -57,21 +57,63 @@ async def get_details(object: filter):
 
 
 
-class cart_item(BaseModel):
-    item: str
+class CartItem(BaseModel):
+    product_id: int 
+    action: str
 
-@app.post("/cart/")
-def add_to_cart(object: cart_item):
+@app.post("/cart/update")
+async def update_cart(item: CartItem):
     conn = Get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
 
-    
     try:
-        cursor.execute("insert into cart (book_id, product, price, quantity) values (1, 'Harry Potter', 19.99, 1) on duplicate key update quantity = quantity + 1;")
-        return {"message":"Added item to cart"}
+        cursor.execute("SELECT product_id, product, price FROM shelf WHERE product_id = %s", (item.product_id,))
+        product_details = cursor.fetchone()
+        cursor.execute("select quantity from record where product_id=%s",(item.product_id,))
+        record_quantity_check = cursor.fetchone()
+
+        if not product_details:
+            raise HTTPException(status_code=404, detail=f"Product with ID {item.product_id} not found in shelf.")
+
+        check_cart_query = "SELECT quantity FROM cart WHERE product_id = %s"
+        cursor.execute(check_cart_query, (item.product_id,))
+        cart_item = cursor.fetchone()
+
+        if item.action == "add":
+            if cart_item:
+                if (record_quantity_check.quantity <= cart_item.quantity):
+                    update_query = "UPDATE cart SET quantity = quantity + 1 WHERE product_id = %s"
+                    cursor.execute(update_query, (item.product_id,))
+                elif  (record_quantity_check.quantity <= cart_item.quantity):
+                    update_record_quantity = "update record set quantity = %s"
+                    cursor.execute(update_record_quantity,("booked"))
+            else:
+                insert_query = """
+                    INSERT INTO cart (product_id, product, price, quantity)
+                    VALUES (%s, %s, %s, %s)
+                """
+                cursor.execute(insert_query, (product_details["id"], product_details["product"], product_details["price"], 1))
+
+
+        elif item.action == "remove":
+            if cart_item and cart_item["quantity"] > 1:
+                update_query = "UPDATE cart SET quantity = quantity - 1 WHERE product_id = %s"
+                cursor.execute(update_query, (item.product_id,))
+            elif cart_item and cart_item["quantity"] == 1:
+                delete_query = "DELETE FROM cart WHERE product_id = %s"
+                cursor.execute(delete_query, (item.product_id,))
+            else:
+                raise HTTPException(status_code=404, detail=f"Product with ID {item.product_id} not found in cart.")
+        else:
+            raise HTTPException(status_code=400, detail="Invalid action. Use 'add' or 'remove'.")
+
+        conn.commit()
+        cursor.execute("SELECT * FROM cart")
+        updated_cart = cursor.fetchall()
+        return {"message": f"Cart updated successfully.", "cart": updated_cart}
+
     except Exception as e:
-        raise HTTPException(status_code=221,detail=str(e))
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
     finally:
         cursor.close()
         conn.close()
-
