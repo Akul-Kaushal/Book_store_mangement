@@ -67,41 +67,57 @@ async def update_cart(item: CartItem):
     cursor = conn.cursor(dictionary=True)
 
     try:
-        cursor.execute("SELECT product_id, product, price FROM shelf WHERE product_id = %s", (item.product_id,))
+        cursor.execute("SELECT product_id, product, price, status FROM shelf WHERE product_id = %s", (item.product_id,))
         product_details = cursor.fetchone()
-        cursor.execute("select quantity from record where product_id=%s",(item.product_id,))
-        record_quantity_check = cursor.fetchone()
 
         if not product_details:
             raise HTTPException(status_code=404, detail=f"Product with ID {item.product_id} not found in shelf.")
 
+        cursor.execute("select quantity,status from record where product_id = %s",(item.product_id,))
+        record_quantity_check = cursor.fetchone() 
+        if not record_quantity_check:
+            raise HTTPException(status_code=404, detail=f"Product with ID {item.product_id} not found in shelf.")
+
         check_cart_query = "SELECT quantity FROM cart WHERE product_id = %s"
         cursor.execute(check_cart_query, (item.product_id,))
-        cart_item = cursor.fetchone()
+        cart_item = cursor.fetchone() or {}
 
         if item.action == "add":
             if cart_item:
-                if (record_quantity_check.quantity <= cart_item.quantity):
-                    update_query = "UPDATE cart SET quantity = quantity + 1 WHERE product_id = %s"
+                if ((record_quantity_check["status"]=="available") and record_quantity_check["quantity"] > cart_item["quantity"]):
+                    update_query = "update cart set quantity = quantity + 1 where product_id = %s"
                     cursor.execute(update_query, (item.product_id,))
-                elif  (record_quantity_check.quantity <= cart_item.quantity):
-                    update_record_quantity = "update record set quantity = %s"
-                    cursor.execute(update_record_quantity,("booked"))
+                elif (record_quantity_check["status"]=="booked"):
+                    raise HTTPException(status_code=404, detail=f"Product with ID {item.product_id} already booked.")
+                elif  (record_quantity_check["quantity"] <= cart_item["quantity"]):
+                    update_record_quantity = "update record set status = %s where product_id = %s"
+                    cursor.execute(update_record_quantity,("booked",item.product_id,))
+                    update_record_quantity = "update shelf set status = %s where product_id = %s"
+                    cursor.execute(update_record_quantity,("booked",item.product_id,))
             else:
                 insert_query = """
                     INSERT INTO cart (product_id, product, price, quantity)
                     VALUES (%s, %s, %s, %s)
                 """
-                cursor.execute(insert_query, (product_details["id"], product_details["product"], product_details["price"], 1))
+                cursor.execute(insert_query, (product_details["product_id"], product_details["product"], product_details["price"], 1))
 
 
         elif item.action == "remove":
             if cart_item and cart_item["quantity"] > 1:
                 update_query = "UPDATE cart SET quantity = quantity - 1 WHERE product_id = %s"
                 cursor.execute(update_query, (item.product_id,))
+                update_record_quantity = "update record set status = %s where product_id = %s"
+                cursor.execute(update_record_quantity,("available", item.product_id,))
+                update_record_quantity = "update shelf set status = %s where product_id = %s"
+                cursor.execute(update_record_quantity,("available",item.product_id,))
+
             elif cart_item and cart_item["quantity"] == 1:
                 delete_query = "DELETE FROM cart WHERE product_id = %s"
                 cursor.execute(delete_query, (item.product_id,))
+                update_record_quantity = "update record set status = %s where product_id = %s"
+                cursor.execute(update_record_quantity,("available", item.product_id,))
+                update_record_quantity = "update shelf set status = %s where product_id = %s"
+                cursor.execute(update_record_quantity,("available",item.product_id,))
             else:
                 raise HTTPException(status_code=404, detail=f"Product with ID {item.product_id} not found in cart.")
         else:
