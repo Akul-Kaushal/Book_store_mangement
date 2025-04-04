@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import re 
 from  typing import Optional
+import uuid
 
 
 app = FastAPI()
@@ -87,8 +88,13 @@ async def update_cart(item: CartItem):
                 if ((record_quantity_check["status"]=="available") and record_quantity_check["quantity"] > cart_item["quantity"]):
                     update_query = "update cart set quantity = quantity + 1 where product_id = %s"
                     cursor.execute(update_query, (item.product_id,))
-                elif (record_quantity_check["status"]=="booked"):
+
+                elif (record_quantity_check["status"]=="booked" ):
                     raise HTTPException(status_code=404, detail=f"Product with ID {item.product_id} already booked.")
+
+                elif (record_quantity_check["status"]=="out_of_stock" ):
+                    raise HTTPException(status_code=404, detail=f"Product with ID {item.product_id} is Out Of Stock.")
+
                 elif  (record_quantity_check["quantity"] <= cart_item["quantity"]):
                     update_record_quantity = "update record set status = %s where product_id = %s"
                     cursor.execute(update_record_quantity,("booked",item.product_id,))
@@ -99,7 +105,13 @@ async def update_cart(item: CartItem):
                     INSERT INTO cart (product_id, product, price, quantity)
                     VALUES (%s, %s, %s, %s)
                 """
-                cursor.execute(insert_query, (product_details["product_id"], product_details["product"], product_details["price"], 1))
+                cursor.execute(insert_query, 
+                (
+                    product_details["product_id"], 
+                    product_details["product"], 
+                    product_details["price"], 
+                    1
+                ))
 
 
         elif item.action == "remove":
@@ -130,6 +142,108 @@ async def update_cart(item: CartItem):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+
+
+class CheckoutRequest(BaseModel):
+    user_id: Optional[str] = None
+
+@app.post("/checkout")
+async def checkout(request: CheckoutRequest):
+    conn = Get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    try:
+        transaction_id = str(uuid.uuid4())
+        conn.start_transaction()
+
+        cursor.execute("SELECT * FROM cart")
+        cart_items = cursor.fetchall()
+        if not cart_items:
+            raise HTTPException(status_code=400, detail="Cart is empty")
+
+        total = 0
+        for item in cart_items:
+            cursor.execute("""
+                SELECT quantity 
+                FROM record 
+                WHERE product_id = %s
+            """, (item["product_id"],))
+            record = cursor.fetchone()
+            
+            if not record:
+                raise HTTPException(status_code=404, detail=f"Product {item['product_id']} not found in inventory")
+                
+            if record["quantity"] < item["quantity"]:
+                raise HTTPException(status_code=400, detail=f"Insufficient stock for product {item['product_id']}")
+
+            total += item["price"] * item["quantity"]
+
+        for item in cart_items:
+            
+            cursor.execute("""
+                INSERT INTO transaction 
+                (transaction_id, user_id, product_id, product, quantity, total_price)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                transaction_id,
+                request.user_id,
+                item["product_id"],
+                item["product"],
+                item["quantity"],
+                item["price"] * item["quantity"]
+            ))
+
+            cursor.execute("""
+                UPDATE record 
+                SET quantity = quantity - %s,
+                    status = CASE 
+                        WHEN (quantity - %s) <= 0 THEN 'out_of_stock' 
+                        ELSE status 
+                    END
+                WHERE product_id = %s
+            """, (
+                item["quantity"], 
+                item["quantity"], 
+                item["product_id"]
+            ))
+
+            cursor.execute("""
+                UPDATE shelf 
+                SET  status= %s
+                WHERE product_id = %s
+            """, (
+                "out_of_stock",
+                item["product_id"],
+            ))
+
+        cursor.execute("DELETE FROM cart")
+        
+        conn.commit()
+        return {"message": "Checkout successful", "total": total, "transaction_id": transaction_id}
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Transaction failed: {str(e)}")
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.get("/transactions")
+async def get_transactions(user_id: Optional[int] = None):
+    conn = Get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        if user_id:
+            cursor.execute("SELECT * FROM transaction WHERE user_id = %s", (user_id,))
+        else:
+            cursor.execute("SELECT * FROM transaction")
+        transactions = cursor.fetchall()
+        return {"transactions": transactions}
     finally:
         cursor.close()
         conn.close()
